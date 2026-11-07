@@ -61,7 +61,6 @@ Uninstall preserves does not remove configs.
 | Option | Effect |
 | --- | --- |
 | `-c`, `--no-color`, `--no-colour` | Disable color (enabled by default). |
-| `--color`, `--colour` | Enable color explicitly, overriding an earlier `-c`. |
 | `-f`, `--fps` | Show frame rate and simulation statistics. |
 | `-F N`, `--max-fps N` | Cap rendering at 1–240 FPS; overrides the config (default 40). |
 | `-m`, `--mouse` | Start empty and add smoke/velocity by dragging the left mouse button. |
