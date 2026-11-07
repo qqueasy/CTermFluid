@@ -3,7 +3,10 @@
 An ASCII fluid simulation the terminal, written in C with ncurses.
 Run a custom scene or use the mouse in a blank canvas.
 
-![A captured frame of the default program](doc/demo.svg)
+### showcase
+
+![demo1](doc/pic1.png)
+![demo2](doc/pic2.png)
 
 ```sh
 ctermfluid                     # opposing colored plumes
