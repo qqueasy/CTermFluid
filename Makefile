@@ -46,8 +46,11 @@ uninstall:
 dist:
 	test -f LICENSE
 	test ! -e "$(DISTDIR)"
+	@set -e; for file in $(DISTFILES); do \
+		test -f "$$file" || { printf 'Missing distribution file: %s\n' "$$file" >&2; exit 1; }; \
+	done
 	mkdir "$(DISTDIR)"
-	@for file in $(DISTFILES); do mkdir -p "$(DISTDIR)/$$(dirname "$$file")"; cp "$$file" "$(DISTDIR)/$$file"; done
+	@set -e; for file in $(DISTFILES); do mkdir -p "$(DISTDIR)/$$(dirname "$$file")"; cp "$$file" "$(DISTDIR)/$$file"; done
 	tar -czf "$(DISTDIR).tar.gz" "$(DISTDIR)"
 	rm -r "$(DISTDIR)"
 
