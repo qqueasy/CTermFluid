@@ -9,11 +9,10 @@ Run a custom scene or use the mouse in a blank canvas.
 ![demo2](doc/pic2.png)
 
 ```sh
-ctermfluid                     # opposing colored plumes
+ctermfluid                  # opposing colored plumes
 ctermfluid -p crossflow     # diagonal jets program
-ctermfluid -m                 # empty canvas; left-drag to paint smoke
-ctermfluid -n                 # smoke that does not dissipate
-ctermfluid -F 20            # cap rendering at 20 FPS
+ctermfluid -p rain          # rainbow rain program
+ctermfluid -m               # empty canvas; left-drag to paint smoke
 ```
 
 The visible grid supports up to **1024 columns × 512 rows**, providing headroom
