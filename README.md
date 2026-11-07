@@ -13,8 +13,6 @@ ctermfluid -n                 # smoke that does not dissipate
 ctermfluid -F 20            # cap rendering at 20 FPS
 ```
 
-Press **q**, **Escape**, or **Ctrl+C** to quit. Resizing resets the simulation.
-
 The visible grid supports up to **1024 columns × 512 rows**, providing headroom
 for a fullscreen 3840×2160 terminal with a small font.
 
@@ -48,13 +46,7 @@ The default prefix is `/usr`. Installation copies the executable to `/usr/bin`,
 its manual to `/usr/share/man/man1`, and its MIT license to
 `/usr/share/doc/ctermfluid/LICENSE`. It does not write configs into root's home.
 
-Run CTermFluid without sudo. Missing bundled programs are created on first use
-in `~/.config/ctermfluid` (or `$XDG_CONFIG_HOME/ctermfluid`) as your user.
-Existing configs are preserved. The seed copies are generated from the files in
-`programs/` during the build; the simulation reads the editable `.conf` files.
-
-For a different installation location, `PREFIX` is still supported. `DESTDIR`
-stages the system files for packaging without creating any user configs.
+For a different installation location, `PREFIX` is supported. 
 
 ```sh
 sudo make uninstall
