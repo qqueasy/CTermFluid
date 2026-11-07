@@ -3,7 +3,7 @@
 An ASCII fluid simulation the terminal, written in C with ncurses and based on [this article](https://shahriyarshahrabi.medium.com/gentle-introduction-to-fluid-simulation-for-programmers-and-technical-artists-7c0045c40bac).
 Run a custom scene or use the mouse in a blank canvas.
 
-### showcase
+## Showcase
 
 ![demo1](doc/pic1.png)
 ![demo2](doc/pic2.png)
