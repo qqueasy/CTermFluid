@@ -1,6 +1,6 @@
 # CTermFluid
 
-An ASCII fluid simulation the terminal, written in C with ncurses.
+An ASCII fluid simulation the terminal, written in C with ncurses and based on [this article](https://shahriyarshahrabi.medium.com/gentle-introduction-to-fluid-simulation-for-programmers-and-technical-artists-7c0045c40bac).
 Run a custom scene or use the mouse in a blank canvas.
 
 ### showcase
