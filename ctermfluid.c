@@ -1,20 +1,23 @@
-#include <bits/time.h>
+#define _POSIX_C_SOURCE 200809L
 #include <ncurses.h>
 #include <math.h>
 #include <string.h>
 #include <time.h>
-#include <ncurses.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <termios.h>
-#include <poll.h>
-#include <fcntl.h>
 #include <signal.h>
 #include <getopt.h>
+#include <errno.h>
+#include <ctype.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include "config.h"
+#include "build_config.h"
+#include "program_defaults.h"
 
-#define MAX_WIDTH 200
-#define MAX_HEIGHT 100
+#define MAX_WIDTH 1026
+#define MAX_HEIGHT 514
 int width;
 int height;
 int displayWidth;
@@ -26,30 +29,35 @@ typedef struct {
 } vec2;
 
 typedef struct {
-    float r;
-    float g;
-    float b;
-} vec3;
-
-typedef struct {
     int fps;
+    int max_fps;
     int col;  
     int mouse;
+    int no_dissipation;
+    int check_config;
+    const char *program;
 } Args;
 
 Args args;
 static int color_ready;
 static volatile sig_atomic_t stop_requested;
+static Program active_program;
 
 static void usage(FILE *stream, const char *program) {
     fprintf(stream,
             "Usage: %s [OPTIONS]\n"
-            "ASCII fluid simulation for the terminal.\n"
+            "CTermFluid: ASCII fluid simulation for the terminal.\n"
             "\n"
             "Options:\n"
-            "  -c, --color, --colour  Enable terminal palette colors\n"
+            "  -c, --no-color         Disable color (enabled by default)\n"
+            "      --no-colour        Alias for --no-color\n"
+            "      --color, --colour  Enable color explicitly\n"
             "  -f, --fps              Show frame rate and simulation statistics\n"
+            "  -F, --max-fps N        Cap rendering at 1-240 FPS (default: 40)\n"
             "  -m, --mouse            Start empty; drag the left mouse button to add smoke\n"
+            "  -p, --program NAME|FILE Load a program (default: default)\n"
+            "  -n, --no-dissipation   Disable smoke dissipation\n"
+            "  -t, --check-config     Validate the selected program and exit\n"
             "  -h, --help             Show this help and exit\n"
             "  -V, --version          Show version information and exit\n"
             "\n"
@@ -57,9 +65,102 @@ static void usage(FILE *stream, const char *program) {
             program);
 }
 
+static int parse_max_fps(const char *text, int *out) {
+    if (!isdigit((unsigned char)*text)) return 0;
+    char *end;
+    errno = 0;
+    long value = strtol(text, &end, 10);
+    if (errno || *end || value < 1 || value > 240) return 0;
+    *out = (int)value;
+    return 1;
+}
+
 static void request_stop(int signal_number) {
     (void)signal_number;
     stop_requested = 1;
+}
+
+static void sleep_seconds(double seconds) {
+    struct timespec delay = {(time_t)seconds,
+        (long)((seconds - (time_t)seconds) * 1000000000.0)};
+    while (!stop_requested && nanosleep(&delay, &delay) == -1 && errno == EINTR) {}
+}
+
+static int named_program(const char *directory, const char *name,
+                         char *path, size_t path_size) {
+    int length = snprintf(path, path_size, "%s/%s.conf", directory, name);
+    if (length < 0 || (size_t)length >= path_size) return 0;
+    /* Only a missing file permits fallback to the next directory. */
+    if (access(path, F_OK) == 0) return 1;
+    return errno != ENOENT && errno != ENOTDIR;
+}
+
+/* First-use seeds come from the .conf files at build time, not C demos.
+   Create them as the running user, never during a privileged installation. */
+static int seed_program(const char *directory, const char *name,
+                        char *path, size_t path_size) {
+    const char *contents = NULL;
+    for (size_t i = 0; i < sizeof bundled_programs / sizeof bundled_programs[0]; i++)
+        if (!strcmp(name, bundled_programs[i].name)) contents = bundled_programs[i].contents;
+    if (!contents) return 0;
+    int length = snprintf(path, path_size, "%s/%s.conf", directory, name);
+    if (length < 0 || (size_t)length >= path_size) return 0;
+    char parents[4096];
+    length = snprintf(parents, sizeof parents, "%s", directory);
+    if (length < 0 || (size_t)length >= sizeof parents) return 0;
+    for (char *p = parents + 1; ; p++) {
+        if (*p == '/' || *p == '\0') {
+            char saved = *p;
+            *p = '\0';
+            int result = mkdir(parents, 0700);
+            *p = saved;
+            if (result == -1 && errno != EEXIST) return 1;
+            if (!saved) break;
+        }
+    }
+    char temporary[4096];
+    length = snprintf(temporary, sizeof temporary, "%s/.seed-XXXXXX", directory);
+    if (length < 0 || (size_t)length >= sizeof temporary) return 0;
+    int fd = mkstemp(temporary);
+    if (fd == -1) return 1;
+    size_t remaining = strlen(contents);
+    while (remaining) {
+        ssize_t written = write(fd, contents, remaining);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) {
+            close(fd);
+            unlink(temporary);
+            return 1;
+        }
+        contents += written;
+        remaining -= (size_t)written;
+    }
+    int complete = close(fd) == 0;
+    /* Publish atomically, without replacing an existing file or symlink. */
+    if (complete) link(temporary, path);
+    unlink(temporary);
+    return 1;
+}
+
+static int find_program(const char *name, char *path, size_t path_size) {
+    if (strchr(name, '/') || (strlen(name) >= 5 && !strcmp(name + strlen(name) - 5, ".conf"))) {
+        int length = snprintf(path, path_size, "%s", name);
+        return length >= 0 && (size_t)length < path_size;
+    }
+    if (!*name) return 0;
+    for (const char *p = name; *p; p++)
+        if (!isalnum((unsigned char)*p) && *p != '-' && *p != '_') return 0;
+    char directory[4096];
+    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+    int length = -1;
+    if (xdg && *xdg == '/')
+        length = snprintf(directory, sizeof directory, "%s/ctermfluid", xdg);
+    else if (home && *home == '/')
+        length = snprintf(directory, sizeof directory, "%s/.config/ctermfluid", home);
+    int have_directory = length >= 0 && (size_t)length < sizeof directory;
+    if (have_directory && named_program(directory, name, path, path_size)) return 1;
+    if (named_program("./programs", name, path, path_size)) return 1;
+    return have_directory && seed_program(directory, name, path, path_size);
 }
 
 static int update_dimensions(void) {
@@ -122,6 +223,19 @@ void init_scalar_field(float field[MAX_HEIGHT][MAX_WIDTH]) {
     }
 }
 
+/* Copy only active cells, keeping small terminals inexpensive at a large cap. */
+static void copy_vec_field(vec2 dst[MAX_HEIGHT][MAX_WIDTH],
+                           vec2 src[MAX_HEIGHT][MAX_WIDTH]) {
+    for (int y = 0; y < height; y++)
+        memcpy(dst[y], src[y], (size_t)width * sizeof dst[y][0]);
+}
+
+static void copy_dye_field(vec3 dst[MAX_HEIGHT][MAX_WIDTH],
+                           vec3 src[MAX_HEIGHT][MAX_WIDTH]) {
+    for (int y = 0; y < height; y++)
+        memcpy(dst[y], src[y], (size_t)width * sizeof dst[y][0]);
+}
+
 void apply_velocity_boundaries(vec2 v[MAX_HEIGHT][MAX_WIDTH]) {
     for (int x = 0; x < width; x++) {
         v[0][x] = (vec2){0, 0};
@@ -147,8 +261,8 @@ void calculate_divergence(vec2 velocityField[MAX_HEIGHT][MAX_WIDTH], float diver
     }
 }
 
-void solve(float pressureField[MAX_HEIGHT][MAX_WIDTH], float divergence[MAX_HEIGHT][MAX_WIDTH]) {
-    float pressureFieldNew[MAX_HEIGHT][MAX_WIDTH];
+void solve(float pressureField[MAX_HEIGHT][MAX_WIDTH], float divergence[MAX_HEIGHT][MAX_WIDTH],
+           float pressureFieldNew[MAX_HEIGHT][MAX_WIDTH]) {
     for (int i = 0; i < height; i++) {
         for (int j = 0; j < width; j++) {
             float above, below, left, right;
@@ -338,7 +452,7 @@ vec3 sample_vec3(vec3 f[MAX_HEIGHT][MAX_WIDTH], float x, float y) {
 
 void advect_vec3(vec3 dst[MAX_HEIGHT][MAX_WIDTH], vec3 src[MAX_HEIGHT][MAX_WIDTH], vec2 vel[MAX_HEIGHT][MAX_WIDTH], float dt) {
     /* for dissipation */
-    float retention = expf(-0.05f * dt);
+    float retention = expf(-active_program.dissipation * dt);
 
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
@@ -376,8 +490,8 @@ static int pair_for(vec3 c, float d) {
 }
 
 static void inject(vec3 dye[MAX_HEIGHT][MAX_WIDTH], vec2 vel[MAX_HEIGHT][MAX_WIDTH],
-        int sx, int sy, int s, vec3 col, float vy, float dt) {
-    float rate = 3.0f * dt;
+        int sx, int sy, int s, vec3 col, float vx, float vy, float rate_per_second, float dt) {
+    float rate = rate_per_second * dt;
     for (int oy = -s; oy <= s; oy++) {
         for (int ox = -s; ox <= s; ox++) {
             int y = sy + oy, x = sx + ox;
@@ -388,6 +502,7 @@ static void inject(vec3 dye[MAX_HEIGHT][MAX_WIDTH], vec2 vel[MAX_HEIGHT][MAX_WID
                 dye[y][x].r = r < 1.0f ? r : 1.0f;
                 dye[y][x].g = g < 1.0f ? g : 1.0f;
                 dye[y][x].b = b < 1.0f ? b : 1.0f;
+                vel[y][x].x += vx * dt;
                 vel[y][x].y += vy * dt;
             }
         }
@@ -473,87 +588,63 @@ void render_scalar(float field[MAX_HEIGHT][MAX_WIDTH]) {
     refresh();
 }
 
-static float parse_component(const char *text, size_t length) {
-    char buffer[8];
-
-    if (length >= sizeof(buffer))
-        return 0.0f;
-
-    memcpy(buffer, text, length);
-    buffer[length] = '\0';
-    unsigned long value = strtoul(buffer, NULL, 16);
-    unsigned long max = (1UL << (length * 4)) - 1;
-
-    return (float)value / (float)max;
+static int parse_component(const char *text, size_t length, float *out) {
+    if (length < 1 || length > 4) return 0;
+    unsigned value = 0;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char c = (unsigned char)text[i];
+        if (!isxdigit(c)) return 0;
+        value = value * 16 + (isdigit(c) ? c - '0' : tolower(c) - 'a' + 10);
+    }
+    *out = (float)value / (float)((1U << (length * 4)) - 1);
+    return 1;
 }
 
-int terminal_palette_color(int index, vec3 *color) {
-    int fd = open("/dev/tty", O_RDWR);
-
-    if (fd == -1)
-        return 0;
-
-    struct termios old_term;
-    struct termios raw_term;
-
-    if (tcgetattr(fd, &old_term) == -1) {
-        close(fd);
-        return 0;
+/* Replies arrive asynchronously in getch(), alongside mouse/keyboard input. */
+static void apply_palette_reply(const char *text) {
+    if (strncmp(text, "4;", 2)) return;
+    char *end;
+    unsigned long index = strtoul(text + 2, &end, 10);
+    if (end == text + 2 || index > 15 || strncmp(end, ";rgb:", 5)) return;
+    const char *r = end + 5, *slash1 = strchr(r, '/');
+    if (!slash1) return;
+    const char *g = slash1 + 1, *slash2 = strchr(g, '/');
+    if (!slash2) return;
+    const char *b = slash2 + 1;
+    vec3 color;
+    if (!parse_component(r, (size_t)(slash1 - r), &color.r) ||
+        !parse_component(g, (size_t)(slash2 - g), &color.g) ||
+        !parse_component(b, strlen(b), &color.b)) return;
+    if (!args.col) return;
+    int changed = 0;
+    if (args.mouse && active_program.mouse_palette == (int)index) {
+        changed = memcmp(&active_program.mouse_color, &color, sizeof color) != 0;
+        active_program.mouse_color = color;
     }
-
-    raw_term = old_term;
-    raw_term.c_lflag &= ~(ICANON | ECHO);
-    raw_term.c_cc[VMIN] = 0;
-    raw_term.c_cc[VTIME] = 2;
-
-    tcsetattr(fd, TCSANOW, &raw_term);
-    char query[32];
-    snprintf(query, sizeof(query), "\033]4;%d;?\033\\", index);
-    write(fd, query, strlen(query));
-    char response[128] = {0};
-    size_t length = 0;
-
-    struct pollfd pfd = {
-        .fd = fd,
-        .events = POLLIN
-    };
-
-    while (length < sizeof(response) - 1) {
-        if (poll(&pfd, 1, 100) <= 0)
-            break;
-        ssize_t count = read(fd, response + length, sizeof(response) - length - 1);
-        if (count <= 0)
-            break;
-        length += count;
-        response[length] = '\0';
-        if (strchr(response, '\a') || strstr(response, "\033\\"))
-            break;
+    if (!args.mouse) {
+        for (size_t i = 0; i < active_program.count; i++) {
+            Source *source = &active_program.sources[i];
+            if (source->palette == (int)index) {
+                if (memcmp(&source->color, &color, sizeof color)) changed = 1;
+                source->color = color;
+            }
+        }
     }
+    if (changed) clearok(stdscr, TRUE);
+}
 
-    tcsetattr(fd, TCSANOW, &old_term);
-    close(fd);
-
-    char *rgb = strstr(response, "rgb:");
-    if (rgb == NULL)
-        return 0;
-    rgb += 4;
-    char *slash1 = strchr(rgb, '/');
-    if (slash1 == NULL)
-        return 0;
-    char *slash2 = strchr(slash1 + 1, '/');
-    if (slash2 == NULL)
-        return 0;
-    char *end = slash2 + 1;
-
-    while (*end && *end != '\033' && *end != '\a') {
-        end++;
-    }
-
-    color->r = parse_component(rgb, slash1 - rgb);
-    color->g = parse_component(slash1 + 1, slash2 - slash1 - 1);
-    color->b = parse_component(slash2 + 1, end - slash2 - 1);
-
-    return 1;
+static void request_palette_colors(void) {
+    if (!color_ready) return;
+    int needed[16] = {0};
+    if (args.mouse && active_program.mouse_palette >= 0)
+        needed[active_program.mouse_palette] = 1;
+    if (!args.mouse)
+        for (size_t i = 0; i < active_program.count; i++)
+            if (active_program.sources[i].palette >= 0)
+                needed[active_program.sources[i].palette] = 1;
+    for (int i = 0; i < 16; i++)
+        if (needed[i]) fprintf(stdout, "\033]4;%d;?\033\\", i);
+    fflush(stdout);
 }
 
 typedef struct {
@@ -601,54 +692,160 @@ static void add_mouse_smoke(MEVENT event, MouseStroke *stroke,
     *stroke = (MouseStroke){1, x, y};
 }
 
-void loop(vec3 colA, vec3 colB) {
+typedef struct {
+    int kind;                   /* ']' for OSC or '[' for CSI. */
+    int escaped, overflow;
+    double started;
+    size_t length;
+    char text[256];
+} TerminalReply;
+
+static void finish_terminal_reply(TerminalReply *reply, MouseStroke *stroke,
+                                 vec3 dye[MAX_HEIGHT][MAX_WIDTH],
+                                 vec2 velocity[MAX_HEIGHT][MAX_WIDTH], int usable) {
+    reply->text[reply->length] = '\0';
+    if (!reply->overflow && reply->kind == ']') apply_palette_reply(reply->text);
+    /* Support SGR mouse reports even with terminfo using the legacy format. */
+    if (!reply->overflow && reply->kind == '[' && args.mouse && usable) {
+        unsigned button, x, y;
+        char action, extra;
+        if (sscanf(reply->text, "<%u;%u;%u%c%c", &button, &x, &y, &action, &extra) == 4 &&
+            button <= 63 && (button & 3) == 0 && x >= 1 && y >= 1 &&
+            x <= MAX_WIDTH && y <= MAX_HEIGHT && (action == 'M' || action == 'm')) {
+            MEVENT event = {0};
+            event.x = (int)x - 1;
+            event.y = (int)y - 1;
+            event.bstate = action == 'm' ? BUTTON1_RELEASED :
+                           (button & 32) ? REPORT_MOUSE_POSITION : BUTTON1_PRESSED;
+            add_mouse_smoke(event, stroke, dye, velocity, active_program.mouse_color);
+        }
+    }
+    *reply = (TerminalReply){0};
+}
+
+static int terminal_reply_input(int key, TerminalReply *reply, MouseStroke *stroke,
+                                vec3 dye[MAX_HEIGHT][MAX_WIDTH],
+                                vec2 velocity[MAX_HEIGHT][MAX_WIDTH], int usable) {
+    if (!reply->kind) {
+        if (key != 27) return 0;
+        /* Distinguish a real Escape key from the start of a terminal report. */
+        wtimeout(stdscr, 25);
+        int next = getch();
+        nodelay(stdscr, TRUE);
+        if (next != ']' && next != '[') {
+            if (next != ERR) ungetch(next);
+            return 0;
+        }
+        reply->kind = next;
+        reply->started = get_time();
+        return 1;
+    }
+    if (key < 0 || key > 255) return 0;
+    if ((reply->kind == ']' && (key == '\a' || (reply->escaped && key == '\\'))) ||
+        (reply->kind == '[' && key >= 0x40 && key <= 0x7e)) {
+        if (reply->kind == '[' && reply->length < sizeof reply->text - 1)
+            reply->text[reply->length++] = (char)key;
+        finish_terminal_reply(reply, stroke, dye, velocity, usable);
+        return 1;
+    }
+    if (key == 27) { reply->escaped = 1; return 1; }
+    if (reply->escaped) reply->overflow = 1;
+    if (reply->length < sizeof reply->text - 1)
+        reply->text[reply->length++] = (char)key;
+    else reply->overflow = 1;
+    return 1;
+}
+
+/* Allocate only the active rows; large static arrays can trigger costly
+   transparent huge-page allocations even when a terminal is small. */
+typedef struct {
+    vec2 (*velocity)[MAX_WIDTH], (*old_velocity)[MAX_WIDTH], (*gradient)[MAX_WIDTH];
+    vec3 (*dye)[MAX_WIDTH], (*old_dye)[MAX_WIDTH];
+    float (*divergence)[MAX_WIDTH], (*pressure)[MAX_WIDTH], (*scratch)[MAX_WIDTH];
+} Fields;
+
+static void free_fields(Fields *fields) {
+    free(fields->velocity); free(fields->old_velocity); free(fields->gradient);
+    free(fields->dye); free(fields->old_dye);
+    free(fields->divergence); free(fields->pressure); free(fields->scratch);
+    *fields = (Fields){0};
+}
+
+static int allocate_fields(Fields *fields) {
+    fields->velocity = calloc((size_t)height, sizeof *fields->velocity);
+    fields->old_velocity = calloc((size_t)height, sizeof *fields->old_velocity);
+    fields->gradient = calloc((size_t)height, sizeof *fields->gradient);
+    fields->dye = calloc((size_t)height, sizeof *fields->dye);
+    fields->old_dye = calloc((size_t)height, sizeof *fields->old_dye);
+    fields->divergence = calloc((size_t)height, sizeof *fields->divergence);
+    fields->pressure = calloc((size_t)height, sizeof *fields->pressure);
+    fields->scratch = calloc((size_t)height, sizeof *fields->scratch);
+    if (!fields->velocity || !fields->old_velocity || !fields->gradient ||
+        !fields->dye || !fields->old_dye || !fields->divergence ||
+        !fields->pressure || !fields->scratch) {
+        free_fields(fields);
+        return 0;
+    }
+    return 1;
+}
+
+int loop(void) {
     const double step = 1.0 / 40.0;
     double last = get_time();
     double accumulator = step;
+    const double frame_interval = 1.0 / active_program.max_fps;
+    double next_render = last, last_render = last - frame_interval;
 
-    float viscosity = 0.0001f;
-    vec2 velocityField[MAX_HEIGHT][MAX_WIDTH];
-    init_vec_field(velocityField);
-    vec2 velocityOld[MAX_HEIGHT][MAX_WIDTH];
-    vec3 dyeField[MAX_HEIGHT][MAX_WIDTH];
-    vec3 dyeOld[MAX_HEIGHT][MAX_WIDTH];
-    init_vec3_field(dyeField);
-    float divergence[MAX_HEIGHT][MAX_WIDTH];
-    float pressureField[MAX_HEIGHT][MAX_WIDTH];
-    vec2 deltaP[MAX_HEIGHT][MAX_WIDTH];
-
+    float viscosity = active_program.viscosity;
+    Fields fields = {0};
     MouseStroke stroke = {0};
+    TerminalReply reply = {0};
+    double next_palette_query = 0;
     int usable = update_dimensions();
+    if (usable && !allocate_fields(&fields)) return 0;
     while (!stop_requested) {
         double frame_start = get_time();
+        if (reply.kind && frame_start - reply.started > 0.5)
+            reply = (TerminalReply){0};
         int key;
         int resized = 0;
         while ((key = getch()) != ERR) {
+            if (terminal_reply_input(key, &reply, &stroke, fields.dye, fields.velocity,
+                                     usable && !resized)) continue;
             if (key == 'q' || key == 'Q' || key == 27) stop_requested = 1;
             if (key == KEY_RESIZE) resized = 1;
             if (key == KEY_MOUSE && args.mouse) {
                 MEVENT event;
                 if (getmouse(&event) == OK && usable && !resized)
-                    add_mouse_smoke(event, &stroke, dyeField, velocityField, colA);
+                    add_mouse_smoke(event, &stroke, fields.dye, fields.velocity, active_program.mouse_color);
             }
         }
         if (stop_requested) break;
         if (resized) {
             stroke.down = 0;
             usable = update_dimensions();
-            memset(velocityField, 0, sizeof velocityField);
-            memset(dyeField, 0, sizeof dyeField);
+            free_fields(&fields);
+            if (usable && !allocate_fields(&fields)) return 0;
             accumulator = step;
             last = frame_start;
+            next_render = frame_start;
+            last_render = frame_start - frame_interval;
             clear();
         }
         if (!usable) {
-            erase();
-            mvaddstr(0, 0, "Resize terminal");
-            refresh();
+            if (frame_start >= next_render) {
+                erase();
+                mvaddstr(0, 0, "Resize terminal");
+                refresh();
+                next_render = frame_start + frame_interval;
+            }
             last = get_time();
-            usleep(25000);
+            sleep_seconds(0.025);
             continue;
+        }
+        if (frame_start >= next_palette_query) {
+            request_palette_colors();
+            next_palette_query = frame_start + 1.0;
         }
         double elapsed = frame_start - last;
         last = frame_start;
@@ -658,68 +855,73 @@ void loop(vec3 colA, vec3 colB) {
         while (accumulator >= step && !stop_requested) {
             float deltaTime = (float)step;
             if (!args.mouse) {
-                inject(
-                        dyeField,
-                        velocityField,
-                        width / 2,
-                        height - 3,
-                        5,
-                        colA,
-                        -100.0f,
-                        deltaTime
-                      );
-
-                inject(
-                        dyeField,
-                        velocityField,
-                        width / 2 + 5,
-                        1,
-                        5,
-                        colB,
-                        100.0f,
-                        deltaTime
-                      );
+                for (size_t i = 0; i < active_program.count; i++) {
+                    const Source *source = &active_program.sources[i];
+                    int x = 1 + (int)lroundf(source->x * (width - 3));
+                    int y = 1 + (int)lroundf(source->y * (height - 3));
+                    inject(fields.dye, fields.velocity, x, y, source->radius,
+                           source->color, source->vx, source->vy, source->rate, deltaTime);
+                }
             }
             // ============= end setup ===========
 
-            memcpy(velocityOld, velocityField, (size_t)height * sizeof velocityField[0]);
-            advect_vec(velocityField, velocityOld, velocityField, deltaTime);
-            memcpy(velocityOld, velocityField, (size_t)height * sizeof velocityField[0]);
-            vector_diffuse(velocityField, velocityOld, viscosity, deltaTime);
-            apply_velocity_boundaries(velocityField);
-            calculate_divergence(velocityField, divergence);
+            copy_vec_field(fields.old_velocity, fields.velocity);
+            advect_vec(fields.velocity, fields.old_velocity, fields.velocity, deltaTime);
+            copy_vec_field(fields.old_velocity, fields.velocity);
+            vector_diffuse(fields.velocity, fields.old_velocity, viscosity, deltaTime);
+            apply_velocity_boundaries(fields.velocity);
+            calculate_divergence(fields.velocity, fields.divergence);
 
             //project
-            memset(pressureField, 0, (size_t)height * sizeof pressureField[0]); // reset pressure before every solve
+            init_scalar_field(fields.pressure); // reset pressure before every solve
             for (int i = 0; i < 30; i++) {
-                solve(pressureField, divergence);
+                solve(fields.pressure, fields.divergence, fields.scratch);
             }
-            gradient(pressureField, deltaP);
-            sub_vector_fields(velocityField, deltaP);
-            apply_velocity_boundaries(velocityField);
+            gradient(fields.pressure, fields.gradient);
+            sub_vector_fields(fields.velocity, fields.gradient);
+            apply_velocity_boundaries(fields.velocity);
 
             // dye
-            memcpy(dyeOld, dyeField, (size_t)height * sizeof dyeField[0]);
-            advect_vec3(dyeField, dyeOld, velocityField, deltaTime);
-            apply_dye_boundaries(dyeField);
-            //memcpy(dyeOld, dyeField, (size_t)height * sizeof dyeField[0]);
-            //scalar_diffuse(dyeField, dyeOld, dyeDiffusion, deltaTime);
+            copy_dye_field(fields.old_dye, fields.dye);
+            advect_vec3(fields.dye, fields.old_dye, fields.velocity, deltaTime);
+            apply_dye_boundaries(fields.dye);
+            //copy_dye_field(fields.old_dye, fields.dye);
+            //scalar_diffuse(fields.dye, fields.old_dye, dyeDiffusion, deltaTime);
 
             accumulator -= step;
         }
-        render(dyeField, elapsed > 0 ? elapsed : step);
-        double remaining = step - (get_time() - frame_start);
-        if (remaining > 0) usleep((useconds_t)(remaining * 1000000.0));
+        double now = get_time();
+        if (now >= next_render) {
+            render(fields.dye, now - last_render);
+            last_render = now;
+            next_render = now + frame_interval;
+        }
+        now = get_time();
+        /* Wake for either the next simulation step or the next render.
+           A low render cap must not slow down smoke movement or input. */
+        double remaining = step - accumulator - (now - frame_start);
+        double until_render = next_render - now;
+        if (until_render < remaining) remaining = until_render;
+        if (remaining > 0) sleep_seconds(remaining);
     }
+    free_fields(&fields);
+    return 1;
 }
 
 int main(int argc, char*argv[]) {
-    args = (Args){.fps = 0, .col = 0};
+    args = (Args){.program = "default", .col = 1};
+    enum { COLOR_ON = 256 };
     static const struct option options[] = {
-        {"color",   no_argument, NULL, 'c'},
-        {"colour",  no_argument, NULL, 'c'},
+        {"color",   no_argument, NULL, COLOR_ON},
+        {"colour",  no_argument, NULL, COLOR_ON},
+        {"no-color", no_argument, NULL, 'c'},
+        {"no-colour", no_argument, NULL, 'c'},
         {"fps",     no_argument, NULL, 'f'},
+        {"max-fps", required_argument, NULL, 'F'},
         {"mouse",   no_argument, NULL, 'm'},
+        {"program", required_argument, NULL, 'p'},
+        {"no-dissipation", no_argument, NULL, 'n'},
+        {"check-config", no_argument, NULL, 't'},
         {"help",    no_argument, NULL, 'h'},
         {"version", no_argument, NULL, 'V'},
         {NULL, 0, NULL, 0}
@@ -727,15 +929,25 @@ int main(int argc, char*argv[]) {
     const char *program = argv[0];
     int option;
     opterr = 0;
-    while ((option = getopt_long(argc, argv, "cfmhV", options, NULL)) != -1) {
+    while ((option = getopt_long(argc, argv, "cfF:mnp:thV", options, NULL)) != -1) {
         switch (option) {
-            case 'c': args.col = 1; break;
+            case 'c': args.col = 0; break;
+            case COLOR_ON: args.col = 1; break;
             case 'f': args.fps = 1; break;
+            case 'F':
+                if (!parse_max_fps(optarg, &args.max_fps)) {
+                    fprintf(stderr, "%s: --max-fps requires an integer from 1 to 240\n", program);
+                    return EXIT_FAILURE;
+                }
+                break;
             case 'm': args.mouse = 1; break;
+            case 'p': args.program = optarg; break;
+            case 'n': args.no_dissipation = 1; break;
+            case 't': args.check_config = 1; break;
             case 'h': usage(stdout, program); return EXIT_SUCCESS;
-            case 'V': puts("fluid 0.3.0"); return EXIT_SUCCESS;
+            case 'V': puts("CTermFluid " CTERMFLUID_VERSION); return EXIT_SUCCESS;
             default:
-                      fprintf(stderr, "%s: invalid option '%s'\n\n",
+                      fprintf(stderr, "%s: invalid option or missing value near '%s'\n\n",
                               program, argv[optind - 1]);
                       usage(stderr, program);
                       return EXIT_FAILURE;
@@ -746,18 +958,33 @@ int main(int argc, char*argv[]) {
         usage(stderr, program);
         return EXIT_FAILURE;
     }
+    char path[4096], error[4608];
+    if (!find_program(args.program, path, sizeof path)) {
+        fprintf(stderr, "%s: program '%s' not found; use -p ./path/to/program.conf\n",
+                program, args.program);
+        return EXIT_FAILURE;
+    }
+    if (!load_program(path, &active_program, error, sizeof error)) {
+        fprintf(stderr, "%s: %s\n", program, error);
+        return EXIT_FAILURE;
+    }
+    if (args.no_dissipation) active_program.dissipation = 0;
+    if (args.max_fps) active_program.max_fps = args.max_fps;
+    if (args.check_config) {
+        printf("%s: valid (%zu sources, dissipation=%g, max_fps=%d)\n", path,
+               active_program.count, (double)active_program.dissipation, active_program.max_fps);
+        return EXIT_SUCCESS;
+    }
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        fprintf(stderr, "%s: an interactive terminal is required\n", program);
+        return EXIT_FAILURE;
+    }
     struct sigaction action = {0};
     action.sa_handler = request_stop;
     sigemptyset(&action.sa_mask);
     sigaction(SIGINT, &action, NULL);
     sigaction(SIGTERM, &action, NULL);
 
-    vec3 colA = {0.0f, 1.0f, 1.0f};
-    vec3 colB = {0.0f, 1.0f, 0.0f};
-    if (args.col) {
-        terminal_palette_color(6, &colA);
-        if (!stop_requested) terminal_palette_color(2, &colB);
-    }
     if (stop_requested) return 0;
 
     initscr();
@@ -771,18 +998,21 @@ int main(int argc, char*argv[]) {
     if (args.mouse) {
         mouseinterval(0);
         mousemask(BUTTON1_PRESSED | BUTTON1_RELEASED | REPORT_MOUSE_POSITION, NULL);
-        fputs("\033[?1002h", stdout);
+        /* SGR mouse coordinates support the full grid; legacy reports are
+           limited to about 223 columns/rows. Enable button-drag reports too. */
+        fputs("\033[?1006h\033[?1002h", stdout);
         fflush(stdout);
     }
 
-    loop(colA, colB);
+    int success = loop();
 
     if (args.mouse) {
-        fputs("\033[?1002l", stdout);
+        fputs("\033[?1002l\033[?1006l", stdout);
         fflush(stdout);
         mousemask(0, NULL);
     }
     if (previous_cursor != ERR) curs_set(previous_cursor);
     endwin();
-    return 0;
+    if (!success) fprintf(stderr, "%s: unable to allocate simulation buffers\n", program);
+    return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

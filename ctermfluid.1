@@ -1,0 +1,91 @@
+.TH CTERMFLUID 1 "November 2026" "CTermFluid" "User Commands"
+.SH NAME
+ctermfluid \- configurable ASCII fluid simulation
+.SH SYNOPSIS
+.B ctermfluid
+.RB [ \-cfmnthV ]
+.RB [ \-p " NAME|FILE" ]
+.RB [ \-F " FPS" ]
+.SH DESCRIPTION
+CTermFluid animates smoke in a terminal using ncurses.
+It runs at a target of 40 simulation updates per second.
+The default program creates two opposing plumes.
+Press q, Escape, or Ctrl+C to quit. Resizing resets the simulation.
+.SH OPTIONS
+.TP
+.BR \-c ", " \-\-no-color ", " \-\-no-colour
+Disable colors. Color is enabled by default on 256-color terminals, with
+monochrome fallback when unavailable. The long options \-\-color and
+\-\-colour explicitly enable color again.
+.TP
+.BR \-f ", " \-\-fps
+Show frame rate and simulation statistics.
+.TP
+.BR \-F ", " \-\-max-fps " N"
+Cap rendering at N frames per second (integer 1 to 240, default 40).
+Overrides max_fps in the program file; simulation updates remain at 40 Hz.
+.TP
+.BR \-m ", " \-\-mouse
+Start empty. Drag the left mouse button to add smoke and velocity.
+The terminal must support xterm-compatible mouse reporting.
+.TP
+.BR \-p ", " \-\-program " NAME|FILE"
+Select a named program or an explicit .conf file. Default: default.
+.TP
+.BR \-n ", " \-\-no-dissipation
+Disable dye dissipation, overriding the program's setting.
+Smoke can eventually saturate the screen.
+.TP
+.BR \-t ", " \-\-check-config
+Validate the selected program and exit without starting ncurses.
+.TP
+.BR \-h ", " \-\-help
+Show usage and exit.
+.TP
+.BR \-V ", " \-\-version
+Show version information and exit.
+.SH CONFIGURATION
+Programs use INI-style .conf files. A [simulation] section accepts max_fps
+(integer 1 to 240, default 40) and dissipation
+(0 to 10, default 0.05), viscosity (0 to 1, default 0.0001), and mouse_color
+(#RRGGBB, default #00ffff).
+The optional mouse_palette key (integer 0 to 15) overrides mouse_color from
+the terminal palette in color mouse mode; a failed query keeps mouse_color.
+.PP
+Each repeated [source] section requires x and y (0 to 1, left/top to
+right/bottom), and color (#RRGGBB). Optional keys are radius (integer 0 to 20,
+default 3), vx and vy (-1000 to 1000, default 0), rate (0 to 100, default 3),
+and palette (integer 0 to 15). Positive velocities point right/down.
+Palette is an optional terminal palette override used in color mode;
+unsupported queries retain the configured RGB color.
+Configured palette colors are refreshed asynchronously about once per second.
+New smoke follows theme changes; existing smoke retains its color.
+.PP
+There can be at most 32 sources. Mouse mode ignores emitters but retains the
+simulation settings. Dissipation of zero disables fading. Semicolons introduce
+comments; full lines starting with # are also comments.
+.PP
+Unknown sections or keys, duplicate keys, and invalid values are errors.
+.SH FILES
+Named programs are searched under $XDG_CONFIG_HOME/ctermfluid
+(or $HOME/.config/ctermfluid), then ./programs for source-directory use.
+Only absolute XDG_CONFIG_HOME paths are used.
+Run sudo make install to install the executable in /usr/bin (default prefix /usr),
+its manual, and its license. Run CTermFluid without sudo. Missing bundled
+programs are created in the running user's config directory on first use.
+Installation does not create root-owned user configuration files.
+Existing configurations are not overwritten and uninstall preserves them.
+An argument containing a slash or ending in .conf is opened directly.
+.SH EXAMPLES
+.nf
+ctermfluid
+ctermfluid -p crossflow
+ctermfluid -mn
+ctermfluid -t -p ./custom.conf
+.fi
+.SH EXIT STATUS
+Zero on a successful check, help/version request, or clean exit;
+nonzero on invalid arguments, invalid configuration, or terminal startup failure.
+.SH LIMITS
+The maximum visible simulation area is 1024 columns by 512 rows.
+Extra terminal space is left blank. Native Windows is not supported.

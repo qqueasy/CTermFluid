@@ -1,0 +1,10 @@
+/ctermfluid
+/fluid
+/build_config.h
+/build_config.h.tmp
+/program_defaults.h
+/program_defaults.h.tmp
+*.o
+*.su
+/ctermfluid-*.tar.gz
+/ctermfluid-[0-9]*/
