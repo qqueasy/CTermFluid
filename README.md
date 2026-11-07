@@ -10,7 +10,7 @@ Run a custom scene or use the mouse in a blank canvas.
 
 ```sh
 ctermfluid                     # opposing colored plumes
-ctermfluid -p crossflow     # diagonal jets
+ctermfluid -p crossflow     # diagonal jets program
 ctermfluid -m                 # empty canvas; left-drag to paint smoke
 ctermfluid -n                 # smoke that does not dissipate
 ctermfluid -F 20            # cap rendering at 20 FPS
@@ -55,10 +55,7 @@ For a different installation location, `PREFIX` is supported.
 sudo make uninstall
 ```
 
-Uninstall preserves user configs. If you previously installed elsewhere, older
-`/usr/local/bin/ctermfluid` or `~/.local/bin/ctermfluid` copies may shadow the new
-executable. Remove obsolete copies and run `hash -r` to clear cached paths.
-Use `type -a ctermfluid` to check which executable your shell finds.
+Uninstall preserves does not remove configs.
 
 ## Options
 
@@ -152,10 +149,6 @@ ctermfluid -p ~/.cache/wal/ctermfluid.conf
 make clean all
 make dist
 ```
-
-`VERSION` is the single version source. `make dist` creates
-`ctermfluid-VERSION.tar.gz` containing source, programs, and docs, excluding
-compiled binaries.
 
 ## License
 
